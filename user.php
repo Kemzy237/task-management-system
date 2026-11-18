@@ -1,0 +1,851 @@
+<?php
+session_name("admin");
+session_start();
+
+if (!isset($_SESSION['role']) || !isset($_SESSION['id']) || $_SESSION['role'] !== "admin") {
+    $em = "First login";
+    header("Location: login.php?error=$em");
+    exit();
+}
+
+include "DB_connection.php";
+include "app/model/user.php";
+include "app/model/Department.php";
+
+$currentUserId = (int)$_SESSION['id'];
+$departments   = get_all_departments($conn);
+
+/* ---------- Read filter inputs ---------- */
+$search     = trim($_GET['q'] ?? '');
+$roleFilter = $_GET['role'] ?? '';
+$deptFilter = $_GET['department'] ?? '';
+
+if (!in_array($roleFilter, ['', 'admin', 'employee'], true)) $roleFilter = '';
+if (!is_numeric($deptFilter) && $deptFilter !== '') $deptFilter = '';
+
+/* ---------- Build query ---------- */
+$sql    = "SELECT * FROM users WHERE id != ?";
+$params = [$currentUserId];
+
+if ($search !== '') {
+    $sql .= " AND (full_name LIKE ? OR username LIKE ? OR contact LIKE ?)";
+    $like = '%' . $search . '%';
+    $params[] = $like;
+    $params[] = $like;
+    $params[] = $like;
+}
+
+if ($roleFilter !== '') {
+    $sql .= " AND role = ?";
+    $params[] = $roleFilter;
+}
+
+if ($deptFilter !== '' && $deptFilter !== '0') {
+    $sql .= " AND department = ?";
+    $params[] = (int)$deptFilter;
+} elseif ($deptFilter === '0') {
+    $sql .= " AND (department IS NULL OR department = 0)";
+}
+
+$sql .= " ORDER BY role ASC, full_name ASC";
+
+$stmt = $conn->prepare($sql);
+$stmt->execute($params);
+$users = $stmt->rowCount() > 0 ? $stmt->fetchAll() : [];
+
+/* ---------- Resolve department names ---------- */
+$deptMap = [];
+foreach ($departments as $d) {
+    $deptMap[$d['id']] = $d['name'];
+}
+
+/* ---------- Totals (unfiltered, for header stats) ---------- */
+$totalAll      = (int)$conn->query("SELECT COUNT(*) FROM users WHERE id != " . $currentUserId)->fetchColumn();
+$totalAdmins   = (int)$conn->query("SELECT COUNT(*) FROM users WHERE id != " . $currentUserId . " AND role = 'admin'")->fetchColumn();
+$totalEmployee = (int)$conn->query("SELECT COUNT(*) FROM users WHERE id != " . $currentUserId . " AND role = 'employee'")->fetchColumn();
+
+/* ---------- Did any filter apply? ---------- */
+$hasFilter = ($search !== '' || $roleFilter !== '' || ($deptFilter !== '' && $deptFilter !== '0')) || $deptFilter === '0';
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Users · Task Management</title>
+
+    <link rel="apple-touch-icon" sizes="180x180" href="favicon/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="favicon/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="favicon/favicon-16x16.png">
+    <link rel="manifest" href="favicon/site.webmanifest">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --bg:            #f4f6fb;
+            --surface:       #ffffff;
+            --surface-alt:   #f8fafc;
+            --border:        #e5e9f0;
+            --text:          #1e293b;
+            --text-muted:    #64748b;
+            --text-subtle:   #94a3b8;
+
+            --primary:       #4f46e5;
+            --primary-hover: #4338ca;
+            --primary-soft:  #eef2ff;
+
+            --success:       #10b981;
+            --success-soft:  #ecfdf5;
+            --warning:       #f59e0b;
+            --warning-soft:  #fffbeb;
+            --danger:        #ef4444;
+            --danger-soft:   #fef2f2;
+            --info:          #0ea5e9;
+            --info-soft:     #f0f9ff;
+
+            --radius:        14px;
+            --radius-sm:     10px;
+            --shadow-sm:     0 1px 2px rgba(15, 23, 42, 0.04);
+            --shadow-md:     0 4px 16px rgba(15, 23, 42, 0.06);
+            --transition:    0.22s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { height: 100%; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            font-size: 14px;
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        a { text-decoration: none; color: inherit; }
+
+        /* ============ LAYOUT ============ */
+        .app-shell { min-height: 100vh; }
+
+        .app-main {
+            margin-left: 260px;
+            padding: 28px 32px 48px;
+            max-width: 1600px;
+            width: calc(100% - 260px);
+        }
+
+        /* ============ PAGE HEADER ============ */
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .page-title {
+            font-size: 26px;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            color: var(--text);
+        }
+
+        .page-subtitle {
+            color: var(--text-muted);
+            font-size: 14px;
+            margin-top: 4px;
+        }
+
+        .page-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+        /* ============ BUTTONS ============ */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 16px;
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            font-weight: 600;
+            border: 1px solid transparent;
+            cursor: pointer;
+            transition: var(--transition);
+            font-family: inherit;
+            white-space: nowrap;
+        }
+        .btn svg { width: 14px; height: 14px; }
+        .btn-primary {
+            background: var(--primary);
+            color: #fff;
+            box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25);
+        }
+        .btn-primary:hover { background: var(--primary-hover); transform: translateY(-1px); }
+        .btn-ghost {
+            background: var(--surface);
+            color: var(--text);
+            border-color: var(--border);
+        }
+        .btn-ghost:hover { background: var(--surface-alt); }
+
+        /* ============ STAT STRIP ============ */
+        .stat-strip {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .stat-mini {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 16px 18px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .stat-mini-icon {
+            width: 38px;
+            height: 38px;
+            border-radius: 10px;
+            display: grid;
+            place-items: center;
+            flex-shrink: 0;
+            background: var(--primary-soft);
+            color: var(--primary);
+        }
+        .stat-mini-icon.success { background: var(--success-soft); color: var(--success); }
+        .stat-mini-icon.warning { background: var(--warning-soft); color: var(--warning); }
+        .stat-mini-icon.danger  { background: var(--danger-soft);  color: var(--danger); }
+        .stat-mini-icon.info    { background: var(--info-soft);    color: var(--info); }
+        .stat-mini-icon svg { width: 18px; height: 18px; }
+
+        .stat-mini-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .stat-mini-value {
+            font-size: 20px;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            color: var(--text);
+            line-height: 1.2;
+        }
+
+        /* ============ FILTER BAR ============ */
+        .filter-bar {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px 16px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: flex-end;
+        }
+
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            flex: 1;
+            min-width: 180px;
+        }
+
+        .filter-group.search-group { flex: 2; min-width: 260px; }
+
+        .filter-label {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-subtle);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .search-wrap {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
+        .search-wrap svg {
+            position: absolute;
+            left: 12px;
+            width: 16px;
+            height: 16px;
+            color: var(--text-subtle);
+            pointer-events: none;
+        }
+
+        .search-input,
+        .filter-select {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            color: var(--text);
+            font-family: inherit;
+            font-size: 13.5px;
+            transition: var(--transition);
+        }
+
+        .search-input { padding-left: 38px; }
+
+        .search-input:focus,
+        .filter-select:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+        }
+
+        .search-input::placeholder { color: var(--text-subtle); }
+
+        .filter-select {
+            appearance: none;
+            -webkit-appearance: none;
+            background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 12px center;
+            background-size: 16px;
+            padding-right: 38px;
+            cursor: pointer;
+        }
+
+        .filter-actions {
+            display: flex;
+            gap: 8px;
+            align-items: flex-end;
+        }
+
+        /* ============ RESULT META ============ */
+        .result-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .result-count {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+        .result-count strong { color: var(--text); font-weight: 700; }
+
+        .active-filters {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .filter-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11.5px;
+            font-weight: 600;
+            background: var(--primary-soft);
+            color: var(--primary);
+            border: 1px solid #c7d2fe;
+        }
+
+        .filter-chip a {
+            display: grid;
+            place-items: center;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: rgba(79, 70, 229, 0.15);
+            color: var(--primary);
+            transition: var(--transition);
+        }
+        .filter-chip a:hover { background: var(--primary); color: #fff; }
+        .filter-chip svg { width: 10px; height: 10px; }
+
+        /* ============ TABLE CARD ============ */
+        .table-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+        }
+        .table-wrap { overflow-x: auto; }
+
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13.5px;
+        }
+        .data-table thead th {
+            text-align: left;
+            padding: 14px 18px;
+            font-weight: 600;
+            font-size: 11.5px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            background: var(--surface-alt);
+            border-bottom: 1px solid var(--border);
+            white-space: nowrap;
+        }
+        .data-table tbody td {
+            padding: 14px 18px;
+            border-bottom: 1px solid var(--border);
+            color: var(--text);
+            vertical-align: middle;
+        }
+        .data-table tbody tr { transition: background var(--transition); }
+        .data-table tbody tr:hover { background: var(--surface-alt); }
+        .data-table tbody tr:last-child td { border-bottom: none; }
+
+        .cell-id {
+            font-weight: 600;
+            color: var(--text-subtle);
+            font-variant-numeric: tabular-nums;
+            width: 50px;
+        }
+
+        .cell-user {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .user-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, var(--primary) 0%, #7c3aed 100%);
+            color: #fff;
+            display: grid;
+            place-items: center;
+            font-size: 12px;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+        .user-avatar.admin {
+            background: linear-gradient(135deg, #ef4444 0%, #f59e0b 100%);
+        }
+        .user-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+        .user-name { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .user-handle { font-size: 12px; color: var(--text-subtle); }
+
+        .cell-muted { color: var(--text-muted); }
+        .cell-muted.mono { font-variant-numeric: tabular-nums; }
+
+        /* ============ BADGES ============ */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11.5px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .badge::before {
+            content: "";
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+        .badge-admin    { background: var(--danger-soft);  color: #b91c1c; }
+        .badge-employee { background: var(--info-soft);    color: #0369a1; }
+
+        .dept-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-size: 11.5px;
+            font-weight: 600;
+            background: var(--surface-alt);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+        .dept-chip svg { width: 11px; height: 11px; }
+        .dept-chip.none { color: var(--text-subtle); font-style: italic; }
+
+        /* ============ ACTION BUTTONS ============ */
+        .actions { display: flex; gap: 6px; flex-wrap: nowrap; }
+        .action-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 6px 11px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text-muted);
+            transition: var(--transition);
+            cursor: pointer;
+        }
+        .action-btn svg { width: 13px; height: 13px; }
+        .action-btn:hover { transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+        .action-detail:hover { background: var(--info-soft);    color: var(--info);    border-color: var(--info); }
+        .action-edit:hover   { background: var(--primary-soft); color: var(--primary); border-color: var(--primary); }
+        .action-delete:hover { background: var(--danger-soft);  color: var(--danger);  border-color: var(--danger); }
+
+        /* ============ EMPTY STATE ============ */
+        .empty-state { padding: 70px 20px; text-align: center; }
+        .empty-icon {
+            width: 52px;
+            height: 52px;
+            border-radius: 16px;
+            background: var(--surface-alt);
+            display: grid;
+            place-items: center;
+            margin: 0 auto 14px;
+            color: var(--text-subtle);
+        }
+        .empty-icon svg { width: 24px; height: 24px; }
+        .empty-title { font-size: 15px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+        .empty-sub { font-size: 13px; color: var(--text-muted); margin-bottom: 18px; }
+
+        /* ============ FOOTER ============ */
+        .page-footer {
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border);
+            text-align: center;
+            color: var(--text-subtle);
+            font-size: 12px;
+        }
+
+        /* ============ RESPONSIVE ============ */
+        @media (max-width: 960px) {
+            .app-main {
+                margin-left: 0;
+                width: 100%;
+                padding: 76px 16px 40px;
+            }
+            .page-title { font-size: 22px; }
+            .filter-bar { padding: 12px; }
+            .filter-group.search-group { min-width: 100%; }
+            .data-table thead th,
+            .data-table tbody td { padding: 12px 14px; }
+            .hide-sm { display: none; }
+        }
+    </style>
+</head>
+<body>
+<div class="app-shell">
+    <?php include "inc/nav.php"; ?>
+
+    <main class="app-main">
+
+        <!-- ============ PAGE HEADER ============ -->
+        <div class="page-header">
+            <div>
+                <h1 class="page-title">Users</h1>
+                <p class="page-subtitle">
+                    Manage everyone in the workspace — admins and employees.
+                </p>
+            </div>
+            <div class="page-actions">
+                <a href="add-user.php" class="btn btn-primary">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+                        <circle cx="9" cy="7" r="4"/>
+                        <line x1="19" y1="8" x2="19" y2="14"/>
+                        <line x1="22" y1="11" x2="16" y2="11"/>
+                    </svg>
+                    Add User
+                </a>
+            </div>
+        </div>
+
+        <!-- ============ STAT STRIP ============ -->
+        <div class="stat-strip">
+            <div class="stat-mini">
+                <div class="stat-mini-icon info">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                        <circle cx="9" cy="7" r="4"/>
+                        <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                        <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                    </svg>
+                </div>
+                <div>
+                    <div class="stat-mini-label">All Users</div>
+                    <div class="stat-mini-value"><?= $totalAll ?></div>
+                </div>
+            </div>
+
+            <div class="stat-mini">
+                <div class="stat-mini-icon danger">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                    </svg>
+                </div>
+                <div>
+                    <div class="stat-mini-label">Admins</div>
+                    <div class="stat-mini-value"><?= $totalAdmins ?></div>
+                </div>
+            </div>
+
+            <div class="stat-mini">
+                <div class="stat-mini-icon success">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                        <circle cx="12" cy="7" r="4"/>
+                    </svg>
+                </div>
+                <div>
+                    <div class="stat-mini-label">Employees</div>
+                    <div class="stat-mini-value"><?= $totalEmployee ?></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============ FILTER BAR ============ -->
+        <form class="filter-bar" method="GET" action="user.php">
+            <div class="filter-group search-group">
+                <label class="filter-label" for="q">Search</label>
+                <div class="search-wrap">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="8"/>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                    </svg>
+                    <input
+                        type="text"
+                        id="q"
+                        name="q"
+                        class="search-input"
+                        placeholder="Search by name, username, or contact"
+                        value="<?= htmlspecialchars($search) ?>"
+                    >
+                </div>
+            </div>
+
+            <div class="filter-group">
+                <label class="filter-label" for="role">Role</label>
+                <select id="role" name="role" class="filter-select">
+                    <option value="">All roles</option>
+                    <option value="admin"    <?= $roleFilter === 'admin' ? 'selected' : '' ?>>Admins</option>
+                    <option value="employee" <?= $roleFilter === 'employee' ? 'selected' : '' ?>>Employees</option>
+                </select>
+            </div>
+
+            <div class="filter-group">
+                <label class="filter-label" for="department">Department</label>
+                <select id="department" name="department" class="filter-select">
+                    <option value="">All departments</option>
+                    <option value="0" <?= $deptFilter === '0' ? 'selected' : '' ?>>No department</option>
+                    <?php foreach ($departments as $d): ?>
+                        <option value="<?= (int)$d['id'] ?>" <?= $deptFilter == $d['id'] ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($d['name']) ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
+            <div class="filter-actions">
+                <button type="submit" class="btn btn-primary">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+                    </svg>
+                    Apply
+                </button>
+                <?php if ($hasFilter): ?>
+                    <a href="user.php" class="btn btn-ghost">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="6" x2="6" y2="18"/>
+                            <line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                        Clear
+                    </a>
+                <?php endif; ?>
+            </div>
+        </form>
+
+        <!-- ============ RESULT META ============ -->
+        <div class="result-meta">
+            <div class="result-count">
+                Showing <strong><?= count($users) ?></strong>
+                <?= count($users) === 1 ? 'user' : 'users' ?>
+                <?php if ($hasFilter): ?> matching your filters<?php endif; ?>
+            </div>
+            <?php if ($hasFilter): ?>
+                <div class="active-filters">
+                    <?php if ($search !== ''): ?>
+                        <span class="filter-chip">
+                            Search: "<?= htmlspecialchars($search) ?>"
+                            <a href="user.php?<?= http_build_query(array_filter(['role' => $roleFilter, 'department' => $deptFilter])) ?>" aria-label="Clear search">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                            </a>
+                        </span>
+                    <?php endif; ?>
+                    <?php if ($roleFilter !== ''): ?>
+                        <span class="filter-chip">
+                            Role: <?= htmlspecialchars(ucfirst($roleFilter)) ?>
+                            <a href="user.php?<?= http_build_query(array_filter(['q' => $search, 'department' => $deptFilter])) ?>" aria-label="Clear role filter">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                            </a>
+                        </span>
+                    <?php endif; ?>
+                    <?php if ($deptFilter !== ''): ?>
+                        <span class="filter-chip">
+                            Department: <?= $deptFilter === '0' ? 'None' : htmlspecialchars($deptMap[$deptFilter] ?? 'Unknown') ?>
+                            <a href="user.php?<?= http_build_query(array_filter(['q' => $search, 'role' => $roleFilter])) ?>" aria-label="Clear department filter">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                            </a>
+                        </span>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
+        </div>
+
+        <!-- ============ USERS TABLE ============ -->
+        <?php if (!empty($users)): ?>
+            <div class="table-card">
+                <div class="table-wrap">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th style="width:50px;">#</th>
+                                <th>User</th>
+                                <th>Role</th>
+                                <th class="hide-sm">Department</th>
+                                <th class="hide-sm">Contact</th>
+                                <th style="text-align:right;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        <?php $i = 0; foreach ($users as $u): $i++;
+                            $initial = strtoupper(substr($u['full_name'], 0, 1));
+                            $isAdmin = $u['role'] === 'admin';
+                            $deptName = $deptMap[$u['department']] ?? null;
+                        ?>
+                            <tr>
+                                <td class="cell-id"><?= $i ?></td>
+                                <td>
+                                    <div class="cell-user">
+                                        <div class="user-avatar <?= $isAdmin ? 'admin' : '' ?>">
+                                            <?= htmlspecialchars($initial) ?>
+                                        </div>
+                                        <div class="user-info">
+                                            <span class="user-name"><?= htmlspecialchars($u['full_name']) ?></span>
+                                            <span class="user-handle">@<?= htmlspecialchars($u['username']) ?></span>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td>
+                                    <span class="badge badge-<?= $isAdmin ? 'admin' : 'employee' ?>">
+                                        <?= $isAdmin ? 'Admin' : 'Employee' ?>
+                                    </span>
+                                </td>
+                                <td class="hide-sm">
+                                    <?php if ($deptName): ?>
+                                        <span class="dept-chip">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M3 21h18"/>
+                                                <path d="M5 21V7l8-4v18"/>
+                                                <path d="M19 21V11l-6-4"/>
+                                            </svg>
+                                            <?= htmlspecialchars($deptName) ?>
+                                        </span>
+                                    <?php else: ?>
+                                        <span class="dept-chip none">No department</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td class="cell-muted mono hide-sm"><?= htmlspecialchars($u['contact']) ?></td>
+                                <td>
+                                    <div class="actions" style="justify-content:flex-end;">
+                                        <a href="task-details.php?id=<?= (int)$u['id'] ?>" class="action-btn action-detail" title="View details">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                <circle cx="11" cy="11" r="8"/>
+                                                <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                                            </svg>
+                                            Details
+                                        </a>
+                                        <a href="edit-user.php?id=<?= (int)$u['id'] ?>" class="action-btn action-edit" title="Edit user">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                                                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                                            </svg>
+                                            Edit
+                                        </a>
+                                        <a href="delete-user.php?id=<?= (int)$u['id'] ?>" class="action-btn action-delete" title="Delete user" onclick="return confirm('Delete <?= htmlspecialchars(addslashes($u['full_name'])) ?>? This cannot be undone.');">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                <polyline points="3 6 5 6 21 6"/>
+                                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
+                                                <path d="M10 11v6"/>
+                                                <path d="M14 11v6"/>
+                                                <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/>
+                                            </svg>
+                                            Delete
+                                        </a>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        <?php elseif ($hasFilter): ?>
+            <!-- No results for current filters -->
+            <div class="table-card">
+                <div class="empty-state">
+                    <div class="empty-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="11" cy="11" r="8"/>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                        </svg>
+                    </div>
+                    <div class="empty-title">No users match your filters</div>
+                    <div class="empty-sub">Try adjusting the search term, role, or department.</div>
+                    <a href="user.php" class="btn btn-ghost">Clear filters</a>
+                </div>
+            </div>
+        <?php else: ?>
+            <!-- No users at all -->
+            <div class="table-card">
+                <div class="empty-state">
+                    <div class="empty-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                            <circle cx="9" cy="7" r="4"/>
+                            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                        </svg>
+                    </div>
+                    <div class="empty-title">No other users yet</div>
+                    <div class="empty-sub">Add your first team member to get started.</div>
+                    <a href="add-user.php" class="btn btn-primary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="12" y1="5" x2="12" y2="19"/>
+                            <line x1="5" y1="12" x2="19" y2="12"/>
+                        </svg>
+                        Add User
+                    </a>
+                </div>
+            </div>
+        <?php endif; ?>
+
+        <div class="page-footer">
+            &copy; <?= date('Y') ?> Task Management System · All rights reserved
+        </div>
+    </main>
+</div>
+</body>
+</html>
